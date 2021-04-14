@@ -15,22 +15,27 @@ uint8_t lkankowski::Button::_monoStableTrigger = 0;
 
 
 lkankowski::Button::Button()
-    : _pin(0)
+    : _sensorId(0) 
+    ,  _pin(0)
     , _type(MONO_STABLE)
     , _description(NULL)
+    , _exposed(true)
     , _stateForPressed(false)
     , _clickRelayNum(-1)
     , _longclickRelayNum(-1)
     , _doubleclickRelayNum(-1)
     , _eventState(BTN_STATE_INITIAL)
+    , _buttonAction(ButtonAction::BUTTON_NO_ACTION)
     , _startStateMillis(0)
 {};
 
 
-void lkankowski::Button::initialize(int type, const char * desc) {
+void lkankowski::Button::initialize(int sensorId, int type, const char * desc, bool expose = true) {
+  _sensorId = sensorId;
   _type = type & 0x0f;
   if (type & PRESSED_STATE_HIGH) _stateForPressed = true;
   _description = desc;
+  _exposed = expose;
 };
 
 
@@ -56,36 +61,51 @@ void lkankowski::Button::setMonoStableTrigger(unsigned char monoStableTrigger) {
   _monoStableTrigger = monoStableTrigger;
 };
 
+int lkankowski::Button::update()
+{
+  return (_physicalButton.update());
+}
 
-int lkankowski::Button::updateAndGetRelayNum() {
+int lkankowski::Button::readState(){
+  return (_physicalButton.read());
+}
 
-  bool isPinChanged = _physicalButton.update();
-  int buttonPinState = _physicalButton.read();
-
-  int buttonAction = getEvent(isPinChanged, buttonPinState);
-
-  int relayNum = -1;
+int lkankowski::Button::getButtonAction(bool isPinChanged, int buttonAction) {
+  int action = 0;
   if (isPinChanged && ((_type == DING_DONG) || (_type == REED_SWITCH))) {
-      relayNum = _clickRelayNum;
+      action = lkankowski::ButtonAction::BUTTON_SINGLE_SHORT_CLICK;
   } else if (buttonAction & BUTTON_CLICK) {
-    relayNum = _clickRelayNum;
+      action = lkankowski::ButtonAction::BUTTON_SINGLE_SHORT_CLICK;
     #ifdef DEBUG_ACTION
-      Serial.println(String(_description) + " - Click for relay " + relayNum);
+      Serial.println(String(_description) + " - Click");
     #endif
   } else if (buttonAction & BUTTON_DOUBLE_CLICK) {
-    relayNum = _doubleclickRelayNum;
+      action = lkankowski::ButtonAction::BUTTON_DOUBLE_SHORT_CLICK;
     #ifdef DEBUG_ACTION
-      Serial.println(String(_description) + " - DoubleClick for relay " + relayNum);
+      Serial.println(String(_description) + " - DoubleClick");
     #endif
   } else if (buttonAction & BUTTON_LONG_PRESS) {
-    relayNum = _longclickRelayNum;
+    action = lkankowski::ButtonAction::BUTTON_SINGLE_LONG_CLICK;
     #ifdef DEBUG_ACTION
-      Serial.println(String(_description) + " - LongPress for relay " + relayNum);
+      Serial.println(String(_description) + " - LongPress");
     #endif
   }
-  return(relayNum);
-};
+  return(action);
+}
 
+int lkankowski::Button::getRelayNum(int action)
+{
+  switch (action){
+    case ButtonAction::BUTTON_SINGLE_SHORT_CLICK:
+      return _clickRelayNum;
+    case ButtonAction::BUTTON_DOUBLE_SHORT_CLICK:
+      return _doubleclickRelayNum;
+    case ButtonAction::BUTTON_SINGLE_LONG_CLICK:
+      return _longclickRelayNum;
+    default:
+      return -1;
+  }
+};
 
 bool lkankowski::Button::getRelayState(bool relayState) {
 
@@ -106,8 +126,8 @@ int lkankowski::Button::getEvent(bool isPinChanged, int pinState) {
   int result = BUTTON_NO_EVENT;
   int activeLevel = pinState == (_type == REED_SWITCH ? ! _stateForPressed : _stateForPressed);
 
-  bool hasLongClick = _longclickRelayNum != -1;
-  bool hasDoubleClick = _doubleclickRelayNum != -1;
+  bool hasLongClick = _exposed || _longclickRelayNum != -1;
+  bool hasDoubleClick = _exposed || _doubleclickRelayNum != -1;
 
   unsigned long now = millis();
 
@@ -194,6 +214,13 @@ int lkankowski::Button::getEvent(bool isPinChanged, int pinState) {
   return result;
 };
 
+void lkankowski::Button::setButtonAction(int buttonAction){
+  _buttonAction = buttonAction;
+}
+
+bool lkankowski::Button::hasButtonActionChanged(int buttonAction) {
+  return _buttonAction != buttonAction;
+}
 
 String lkankowski::Button::toString() {
 

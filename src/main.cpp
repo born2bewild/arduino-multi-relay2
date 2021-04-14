@@ -4,6 +4,8 @@
 #include <Relay.h>
 #include <Button.h>
 #define MY_GATEWAY_SERIAL
+#define MY_NODE_ID 1
+#define MY_BAUD_RATE 115200
 #include <MySensors.h>
 
 using namespace lkankowski;
@@ -11,6 +13,8 @@ using namespace lkankowski;
 #define xstr(a) str(a)
 #define str(a) #a
 const char * MULTI_RELAY_VERSION = xstr(SKETCH_VERSION);
+
+const char* BUTTON_ACTIONS[4] = {"", "S", "SS", "L"};
 
 #if defined(EXPANDER_PCF8574) || defined(EXPANDER_MCP23017)
   #if defined(EXPANDER_PCF8574)
@@ -46,8 +50,9 @@ const char * MULTI_RELAY_VERSION = xstr(SKETCH_VERSION);
 #ifdef DEBUG_STARTUP
   unsigned long debugCounter = 0;
 #endif
-  
-MyMessage myMessage; // MySensors - Sending Data
+
+MyMessage myMessageRelay; // MySensors - Sending Data  
+MyMessage myMessageButton; // MySensors - Sending Data
 #if defined(DEBUG_COMMUNICATION) || defined(DEBUG_STATS)
   MyMessage debugMessage(255, V_TEXT);
 #endif
@@ -86,7 +91,7 @@ void before() {
     }
     Serial.println(String("# ")+(debugCounter++)+" Debug startup - button config");
     for (int buttonNum = 0; buttonNum < gNumberOfButtons; buttonNum++) {
-      Serial.println(String("# ")+(debugCounter++)+" > "+gButtonConfig[buttonNum].buttonPin+";"+gButtonConfig[buttonNum].buttonType+";"
+      Serial.println(String("# ")+(debugCounter++)+" > "+gButtonConfig[buttonNum].sensorId+";"+gButtonConfig[buttonNum].buttonPin+";"+gButtonConfig[buttonNum].buttonType+";"
                      +gButtonConfig[buttonNum].clickRelayId+";"+gButtonConfig[buttonNum].longClickRelayId+";"
                      +gButtonConfig[buttonNum].doubleClickRelayId+";"+gButtonConfig[buttonNum].buttonDescription);
     }
@@ -171,33 +176,39 @@ void before() {
     gRelay[relayNum].setModeAndStartupState(gRelayConfig[relayNum].relayOptions, versionChangeResetState);
     gRelay[relayNum].start();
   }
+  for (int buttonNum = 0; buttonNum < gNumberOfButtons; buttonNum++) {
+    gButton[buttonNum].initialize(gButtonConfig[buttonNum].sensorId, gButtonConfig[buttonNum].buttonType, gButtonConfig[buttonNum].buttonDescription, gButtonConfig[buttonNum].expose);
+    gButton[buttonNum].setAction(getRelayNum(gButtonConfig[buttonNum].clickRelayId),
+                                 getRelayNum(gButtonConfig[buttonNum].longClickRelayId),
+                                 getRelayNum(gButtonConfig[buttonNum].doubleClickRelayId));
+    gButton[buttonNum].setDebounceInterval(BUTTON_DEBOUNCE_INTERVAL);
+    gButton[buttonNum].attachPin(gButtonConfig[buttonNum].buttonPin);
+  }
   if (versionChangeResetState) {
     // version has changed, so store new version in eeporom
     EEPROM.write(0, CONFIG_VERSION);
   }
 }; // before()
 
+
 // executed AFTER mysensors has been initialised
 void setup() {
   // Send state to MySensor Gateway
-  myMessage.setType(V_STATUS);
+  myMessageRelay.setType(V_STATUS);
   for (int relayNum = 0; relayNum < gNumberOfRelays; relayNum++) {
-    myMessage.setSensor(gRelay[relayNum].getSensorId());
-    send(myMessage.set(gRelay[relayNum].getState())); // send current state
+    myMessageRelay.setSensor(gRelay[relayNum].getSensorId());
+    send(myMessageRelay.set(gRelay[relayNum].getState())); // send current state
   }
 
   // Setup buttons
   lkankowski::Button::Button::setEventIntervals(BUTTON_DOUBLE_CLICK_INTERVAL, BUTTON_LONG_PRESS_INTERVAL);
   lkankowski::Button::Button::setMonoStableTrigger(MONO_STABLE_TRIGGER);
-
+  myMessageButton.setType(V_CUSTOM);
   for (int buttonNum = 0; buttonNum < gNumberOfButtons; buttonNum++) {
-    
-    gButton[buttonNum].initialize(gButtonConfig[buttonNum].buttonType, gButtonConfig[buttonNum].buttonDescription);
-    gButton[buttonNum].setAction(getRelayNum(gButtonConfig[buttonNum].clickRelayId),
-                                 getRelayNum(gButtonConfig[buttonNum].longClickRelayId),
-                                 getRelayNum(gButtonConfig[buttonNum].doubleClickRelayId));
-    gButton[buttonNum].setDebounceInterval(BUTTON_DEBOUNCE_INTERVAL);
-    gButton[buttonNum].attachPin(gButtonConfig[buttonNum].buttonPin);
+    if (gButton[buttonNum].isExposed()) {
+      myMessageButton.setSensor(gButton[buttonNum].getSensorId());
+      send(myMessageButton.set(BUTTON_ACTIONS[0])); // send state
+    }
   }
 };
 
@@ -211,8 +222,17 @@ void loop() {
   #endif
 
   for (int buttonNum = 0; buttonNum < gNumberOfButtons; buttonNum++) {
+    bool isPinChanged = gButton[buttonNum].update();
+    int buttonPinState = gButton[buttonNum].readState();
+    int buttonAction = gButton[buttonNum].getEvent(isPinChanged, buttonPinState);
+    int action = gButton[buttonNum].getButtonAction(isPinChanged, buttonAction);
+    int relayNum = gButton[buttonNum].getRelayNum(action);
     
-    int relayNum = gButton[buttonNum].updateAndGetRelayNum();
+    if(gButton[buttonNum].hasButtonActionChanged(action) == true && gButton[buttonNum].isExposed() == true ) {
+        gButton[buttonNum].setButtonAction(action);
+        myMessageButton.setSensor(gButton[buttonNum].getSensorId());
+        send(myMessageButton.set(BUTTON_ACTIONS[action]));
+    }
     if (relayNum > -1) {
       // mono/bi-stable button toggles the relay, ding-dong/reed-switch switch to exact state
       bool relayState = gButton[buttonNum].getRelayState(gRelay[relayNum].getState());
@@ -221,8 +241,8 @@ void loop() {
         if (millis() > IGNORE_BUTTONS_START_MS) {
       #endif
           if (gRelay[relayNum].changeState(relayState)) {
-            myMessage.setSensor(gRelay[relayNum].getSensorId());
-            send(myMessage.set(relayState));
+            myMessageRelay.setSensor(gRelay[relayNum].getSensorId());
+            send(myMessageRelay.set(relayState));
           }
       #ifdef IGNORE_BUTTONS_START_MS
         }
@@ -233,8 +253,8 @@ void loop() {
   if (Relay::isImpulsePending()) {
     for (int relayNum = 0; relayNum < gNumberOfRelays; relayNum++) {
       if (gRelay[relayNum].impulseProcess()) {
-        myMessage.setSensor(gRelay[relayNum].getSensorId());
-        send(myMessage.set(0));
+        myMessageRelay.setSensor(gRelay[relayNum].getSensorId());
+        send(myMessageRelay.set(0));
       }
     }
   }
@@ -264,6 +284,12 @@ void presentation() {
   for (int relayNum = 0; relayNum < gNumberOfRelays; relayNum++) {
     present(gRelay[relayNum].getSensorId(), S_BINARY, gRelay[relayNum].getDescription());
   }
+
+  for (int buttonNum = 0; buttonNum < gNumberOfButtons; buttonNum++) {
+    if (gButton[buttonNum].isExposed()) {
+      present(gButton[buttonNum].getSensorId(), S_CUSTOM, gButton[buttonNum].getDescription());
+    }
+  }
 };
 
 
@@ -281,8 +307,8 @@ void receive(const MyMessage &message) {
       int relayNum = getRelayNum(message.getSensor());
       if (relayNum == -1) return;
       gRelay[relayNum].changeState(message.getBool());
-      myMessage.setSensor(message.getSensor());
-      send(myMessage.set(message.getBool())); // support for OPTIMISTIC=FALSE (Home Asistant)
+      myMessageRelay.setSensor(message.getSensor());
+      send(myMessageRelay.set(message.getBool())); // support for OPTIMISTIC=FALSE (Home Asistant)
     #ifdef DEBUG_STATS
     } else if (message.getType() == V_VAR1) {
       int debugCommand = message.getInt();
